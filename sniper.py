@@ -2,6 +2,7 @@ import requests
 import os
 import json
 import hashlib
+from datetime import datetime
 
 # -----------------------------
 # CONFIGURACIÓN
@@ -24,20 +25,21 @@ events = {
 
 MAX_PRICE = 17000  # 170€
 STATE_FILE = "sent_alerts.json"
+RESALE_FILE = "resale_history.json"
 
 # -----------------------------
 # ESTADO (ANTI-SPAM)
 # -----------------------------
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
+def load_state(file):
+    if os.path.exists(file):
+        with open(file, "r") as f:
             return json.load(f)
     return {}
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+def save_state(state, file):
+    with open(file, "w") as f:
+        json.dump(state, f, indent=2)
 
 def generate_hash(event_name, offers):
     raw = event_name + str(offers)
@@ -82,10 +84,10 @@ def check_event(event_name, event_id):
         description = offer.get("offerTypeDescription", "Entrada")
 
         if offer_type == "resale":
-            resale.append((description, price))
+            resale.append({"description": description, "price": price})
         else:
             if price <= MAX_PRICE:
-                official.append((description, price))
+                official.append({"description": description, "price": price})
 
     return official, resale
 
@@ -93,21 +95,35 @@ def check_event(event_name, event_id):
 # EJECUCIÓN
 # -----------------------------
 
-state = load_state()
+state = load_state(STATE_FILE)
+resale_history = load_state(RESALE_FILE)
+now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 for event_name, event_id in events.items():
     official, resale = check_event(event_name, event_id)
 
-    # 👀 Resale solo log
+    # 👀 RESALE → histórico
     if resale:
+        if event_name not in resale_history:
+            resale_history[event_name] = []
+
+        for r in resale:
+            # Check si ya está en histórico
+            exists = any(x["description"] == r["description"] and x["price"] == r["price"] for x in resale_history[event_name])
+            if not exists:
+                resale_history[event_name].append({
+                    "description": r["description"],
+                    "price": r["price"],
+                    "first_seen": now
+                })
+
         print(f"\n⚠️ Resale detectado para {event_name}:")
-        for desc, price in resale:
-            print(f"- {desc} | {price/100:.2f}€")
+        for r in resale:
+            print(f"- {r['description']} | {r['price']/100:.2f}€")
 
     # 🔔 Oficiales con anti-spam
     if official:
         alert_hash = generate_hash(event_name, official)
-
         if state.get(event_name) == alert_hash:
             print(f"Ya notificado antes para {event_name}, no se repite.")
             continue
@@ -117,14 +133,14 @@ for event_name, event_id in events.items():
             f"📅 *{event_name}*\n\n"
         )
 
-        for desc, price in official:
-            message += f"🎫 {desc}\n💶 {price/100:.2f}€\n\n"
+        for o in official:
+            message += f"🎫 {o['description']}\n💶 {o['price']/100:.2f}€\n\n"
 
         message += f"🔗 https://www.ticketmaster.es/event/{event_id}"
-
         send_telegram(message)
 
         state[event_name] = alert_hash
 
 # Guardamos estado actualizado
-save_state(state)
+save_state(state, STATE_FILE)
+save_state(resale_history, RESALE_FILE)
