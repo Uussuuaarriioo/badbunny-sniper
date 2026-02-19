@@ -1,8 +1,7 @@
 import requests
 import os
 import json
-import hashlib
-from datetime import datetime
+import sys
 
 # -----------------------------
 # CONFIGURACIÓN
@@ -10,137 +9,110 @@ from datetime import datetime
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-events = {
-    "30 Mayo": "417009905",
-    "31 Mayo": "1848567714",
-    "2 Junio": "1589736692",
-    "3 Junio": "961888291",
-    "6 Junio": "1852247887",
-    "7 Junio": "1341715816",
-    "10 Junio": "412370092",
-    "11 Junio": "2035589996",
-    "14 Junio": "1378879656",
-    "15 Junio": "1566404077",
-}
+# IDs de eventos/fechas de Ticketmaster
+event_ids = [
+    "417009905",   # 30 mayo
+    "1848567714",  # 31 mayo
+    "1589736692",  # 2 junio
+    "961888291",   # 3 junio
+    "1852247887",  # 6 junio
+    "1341715816",  # 7 junio
+    "412370092",   # 10 junio
+    "2035589996",  # 11 junio
+    "1378879656",  # 14 junio
+    "1566404077",  # 15 junio
+]
 
-MAX_PRICE = 17000  # 170€
+# Precio máximo para notificación en céntimos de euro
+MAX_PRICE = 16000  # 160€
+
+# Archivo temporal para anti-spam
 STATE_FILE = "sent_alerts.json"
-RESALE_FILE = "resale_history.json"
 
 # -----------------------------
-# ESTADO (ANTI-SPAM)
+# FUNCIONES
 # -----------------------------
 
-def load_state(file):
-    if os.path.exists(file):
-        with open(file, "r") as f:
-            return json.load(f)
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
-def save_state(state, file):
-    with open(file, "w") as f:
-        json.dump(state, f, indent=2)
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
-def generate_hash(event_name, offers):
-    raw = event_name + str(offers)
-    return hashlib.md5(raw.encode()).hexdigest()
-
-# -----------------------------
-# TELEGRAM
-# -----------------------------
-
-def send_telegram(message):
+def send_telegram(msg):
+    """Envía mensaje a Telegram"""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("⚠️ No hay BOT_TOKEN o CHAT_ID configurados")
+        return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
+    data = {"chat_id": CHAT_ID, "text": msg}
     try:
-        requests.post(url, data=data)
+        requests.post(url, data=data, timeout=10)
     except Exception as e:
-        print("Error enviando Telegram:", e)
+        print(f"Error enviando Telegram: {e}")
 
-# -----------------------------
-# CONSULTA
-# -----------------------------
-
-def check_event(event_name, event_id):
+def check_event(event_id):
+    """Revisa la disponibilidad de un evento"""
     url = f"https://availability.ticketmaster.es/api/v2/TM_ES/availability/{event_id}?subChannelId=1"
-    
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
+        resp = requests.get(url, timeout=10).json()
     except Exception as e:
-        print(f"Error consultando {event_name}: {e}")
+        print(f"Error al consultar evento {event_id}: {e}")
         return [], []
 
-    official = []
-    resale = []
+    official_entries = []
+    resale_entries = []
 
-    for offer in data.get("offers", []):
+    for offer in resp.get("offers", []):
         price = offer.get("price", {}).get("total", 0)
         offer_type = offer.get("type", "").lower()
-        description = offer.get("offerTypeDescription", "Entrada")
+        description = offer.get("offerTypeDescription", "Sin descripción")
 
+        # Clasificamos resale vs oficial
         if offer_type == "resale":
-            resale.append({"description": description, "price": price})
+            resale_entries.append({"price": price, "description": description})
         else:
             if price <= MAX_PRICE:
-                official.append({"description": description, "price": price})
+                official_entries.append({"price": price, "description": description})
 
-    return official, resale
+    return official_entries, resale_entries
 
 # -----------------------------
-# EJECUCIÓN
+# LOOP PRINCIPAL
 # -----------------------------
+state = load_state()
 
-state = load_state(STATE_FILE)
-resale_history = load_state(RESALE_FILE)
-now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+for eid in event_ids:
+    official, resale = check_event(eid)
 
-for event_name, event_id in events.items():
-    official, resale = check_event(event_name, event_id)
+    # Notificación Telegram solo para entradas oficiales
+    new_officials = []
+    for o in official:
+        key = f"{eid}-{o['description']}-{o['price']}"
+        if key not in state:
+            new_officials.append(o)
+            state[key] = True
 
-    # 👀 RESALE → histórico
+    if new_officials:
+        msg = f"🎯 Entradas oficiales disponibles para evento {eid}:\n"
+        for o in new_officials:
+            msg += f"- {o['description']} | {o['price']/100:.2f}€\n"
+        send_telegram(msg)
+
+    # Resale solo en consola/logs
     if resale:
-        if event_name not in resale_history:
-            resale_history[event_name] = []
-
-        for r in resale:
-            # Check si ya está en histórico
-            exists = any(x["description"] == r["description"] and x["price"] == r["price"] for x in resale_history[event_name])
-            if not exists:
-                resale_history[event_name].append({
-                    "description": r["description"],
-                    "price": r["price"],
-                    "first_seen": now
-                })
-
-        print(f"\n⚠️ Resale detectado para {event_name}:")
+        print(f"⚠️ Resale detectado para evento {eid}:")
         for r in resale:
             print(f"- {r['description']} | {r['price']/100:.2f}€")
+        sys.stdout.flush()  # <-- fuerza que GitHub Actions lo muestre
 
-    # 🔔 Oficiales con anti-spam
-    if official:
-        alert_hash = generate_hash(event_name, official)
-        if state.get(event_name) == alert_hash:
-            print(f"Ya notificado antes para {event_name}, no se repite.")
-            continue
+# Guardamos estado
+save_state(state)
 
-        message = (
-            f"🎯 *ENTRADAS OFICIALES DISPONIBLES*\n\n"
-            f"📅 *{event_name}*\n\n"
-        )
-
-        for o in official:
-            message += f"🎫 {o['description']}\n💶 {o['price']/100:.2f}€\n\n"
-
-        message += f"🔗 https://www.ticketmaster.es/event/{event_id}"
-        send_telegram(message)
-
-        state[event_name] = alert_hash
-
-# Guardamos estado actualizado
-save_state(state, STATE_FILE)
-save_state(resale_history, RESALE_FILE)
