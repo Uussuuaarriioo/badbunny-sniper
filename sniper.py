@@ -46,13 +46,17 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-def send_telegram(msg):
+def send_telegram(msg, silent=False):
     """Envía mensaje a Telegram"""
     if not BOT_TOKEN or not CHAT_ID:
         print("⚠️ No hay BOT_TOKEN o CHAT_ID configurados")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg}
+    data = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "disable_notification": silent  # True -> no notifica
+    }
     try:
         requests.post(url, data=data, timeout=10)
     except Exception as e:
@@ -92,10 +96,10 @@ state = load_state()
 for eid in event_ids:
     official, resale = check_event(eid)
 
-    # Notificación Telegram solo para entradas oficiales
+    # Entradas oficiales: Telegram con notificación
     new_officials = []
     for o in official:
-        key = f"{eid}-{o['description']}-{o['price']}"
+        key = f"official-{eid}-{o['description']}-{o['price']}"
         if key not in state:
             new_officials.append(o)
             state[key] = True
@@ -104,14 +108,22 @@ for eid in event_ids:
         msg = f"🎯 Entradas oficiales disponibles para evento {eid}:\n"
         for o in new_officials:
             msg += f"- {o['description']} | {o['price']/100:.2f}€\n"
-        send_telegram(msg)
+        send_telegram(msg, silent=False)
 
-    # Resale solo en consola/logs
+    # Entradas resale: Telegram **sin notificación**
+    for r in resale:
+        key = f"resale-{eid}-{r['description']}-{r['price']}"
+        if key not in state:
+            msg = f"⚠️ Resale detectado para evento {eid}:\n- {r['description']} | {r['price']/100:.2f}€"
+            send_telegram(msg, silent=True)
+            state[key] = True
+
+    # También imprime resale en consola/logs
     if resale:
         print(f"⚠️ Resale detectado para evento {eid}:")
         for r in resale:
             print(f"- {r['description']} | {r['price']/100:.2f}€")
-        sys.stdout.flush()  # <-- fuerza que GitHub Actions lo muestre
+        sys.stdout.flush()  # fuerza que GitHub Actions lo muestre
 
 # Guardamos estado
 save_state(state)
