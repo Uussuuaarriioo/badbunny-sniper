@@ -1,112 +1,100 @@
+import time
 import requests
-import os
-import json
-import sys
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 
-# -----------------------------
-# CONFIGURACIÓN
-# -----------------------------
+# ==========================
+# CONFIG
+# ==========================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-STATE_FILE = "sent_alerts.json"
 
-# IDs de eventos/fechas de Ticketmaster
-event_ids = [
-    "417009905",  # 30 mayo
-    "1848567714",  # 31 mayo
-    "1589736692",  # 2 junio
-    "961888291",  # 3 junio
-    "1852247887",  # 6 junio
-    "1341715816",  # 7 junio
-    "412370092",  # 10 junio
-    "2035589996",  # 11 junio
-    "1378879656",  # 14 junio
-    "1566404077",  # 15 junio
-]
+MAX_PRICE = 170
 
-MAX_PRICE = 17000  # 170€ en céntimos
+EVENTS = {
+    "30 Mayo": "417009905",
+    "31 Mayo": "1848567714",
+    "2 Junio": "1589736692",
+    "3 Junio": "961888291",
+    "6 Junio": "1852247887",
+    "7 Junio": "1341715816",
+    "10 Junio": "412370092",
+    "11 Junio": "2035589996",
+    "14 Junio": "1378879656",
+    "15 Junio": "1566404077",
+}
 
-# -----------------------------
-# UTILIDADES
-# -----------------------------
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {"official": [], "resale": []}
+BASE_URL = "https://www.ticketmaster.es/event/"
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+# ==========================
+# TELEGRAM
+# ==========================
 
-def send_telegram(msg, silent=False):
-    """Envía mensaje a Telegram"""
-    if not BOT_TOKEN or not CHAT_ID:
-        print("⚠️ No hay BOT_TOKEN o CHAT_ID configurados")
-        return
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg, "disable_notification": silent}
-    try:
-        requests.post(url, data=data, timeout=10)
-    except Exception as e:
-        print(f"Error enviando Telegram: {e}")
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-def check_event(event_id):
-    """Revisa la disponibilidad de un evento"""
-    url = f"https://availability.ticketmaster.es/api/v2/TM_ES/availability/{event_id}?subChannelId=1"
-    try:
-        resp = requests.get(url, timeout=10).json()
-    except Exception as e:
-        print(f"Error al consultar evento {event_id}: {e}")
-        return [], []
 
-    official_entries = []
-    resale_entries = []
+# ==========================
+# SELENIUM SETUP
+# ==========================
 
-    for offer in resp.get("offers", []):
-        price = offer.get("price", {}).get("total", 0)
-        offer_type = offer.get("type", "").lower()
-        description = offer.get("offerTypeDescription", "Sin descripción")
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
 
-        if offer_type == "resale":
-            resale_entries.append({"price": price, "description": description, "id": offer.get("id")})
+driver = webdriver.Chrome(options=chrome_options)
+
+
+# ==========================
+# MAIN LOOP
+# ==========================
+
+while True:
+    print("🔎 Buscando entradas...")
+
+    for date, event_id in EVENTS.items():
+        url = BASE_URL + event_id
+        driver.get(url)
+
+        time.sleep(5)  # esperar a que cargue el mapa
+
+        seats = driver.find_elements(
+            By.CSS_SELECTOR,
+            'g[data-component="svg__seat"][type]'
+        )
+
+        if seats:
+            print(f"🔥 ENTRADAS DETECTADAS {date}")
+
+            for seat in seats[:5]:  # limita para no spamear
+                try:
+                    seat.click()
+                    time.sleep(1)
+
+                    price_element = driver.find_element(
+                        By.CSS_SELECTOR,
+                        '[data-testid="price"]'
+                    )
+                    price_text = price_element.text
+                    price = int("".join(filter(str.isdigit, price_text)))
+
+                    if price <= MAX_PRICE:
+                        send_telegram(
+                            f"🎟 Entrada encontrada\n"
+                            f"📅 {date}\n"
+                            f"💶 {price_text}\n"
+                            f"{url}"
+                        )
+
+                except:
+                    pass
+
         else:
-            if price <= MAX_PRICE:
-                official_entries.append({"price": price, "description": description, "id": offer.get("id")})
+            print(f"❌ Nada en {date}")
 
-    return official_entries, resale_entries
-
-# -----------------------------
-# LOOP PRINCIPAL
-# -----------------------------
-state = load_state()
-
-for eid in event_ids:
-    official, resale = check_event(eid)
-
-    # Oficial
-    new_official = [o for o in official if o["id"] not in state["official"]]
-    if new_official:
-        msg = f"🎯 Entradas oficiales disponibles para evento {eid}:\n"
-        for o in new_official:
-            msg += f"- {o['description']} | {o['price']/100:.2f}€\n"
-            state["official"].append(o["id"])
-        send_telegram(msg, silent=False)
-
-    # Resale
-    new_resale = [r for r in resale if r["id"] not in state["resale"]]
-    if new_resale:
-        msg = f"⚠️ Resale detectado para evento {eid}:\n"
-        for r in new_resale:
-            msg += f"- {r['description']} | {r['price']/100:.2f}€\n"
-            state["resale"].append(r["id"])
-        # Mensaje a Telegram pero sin notificación
-        send_telegram(msg, silent=True)
-
-    # Consola para ver todo en GitHub Actions
-    if new_official or new_resale:
-        print(msg)
-        sys.stdout.flush()
-
-save_state(state)
-
+    print("⏳ Esperando 30 segundos...\n")
+    time.sleep(30)
